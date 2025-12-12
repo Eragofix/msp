@@ -83,14 +83,21 @@ std::atomic<bool> logging_finished{false};
 // Timestamp UTC do logu: YYYY-MM-DD HH:MM:SS
 std::string currentUtcTimestamp() {
     using namespace std::chrono;
+
     auto now = system_clock::now();
+    auto now_us = time_point_cast<microseconds>(now);
+    auto us = now_us.time_since_epoch() % seconds(1);
+
     std::time_t now_c = system_clock::to_time_t(now);
     std::tm* tm_utc = std::gmtime(&now_c); // Linux/RPi
 
     std::ostringstream oss;
-    oss << std::put_time(tm_utc, "%Y-%m-%d %H:%M:%S");
+    oss << std::put_time(tm_utc, "%Y-%m-%d_%H:%M:%S")
+        << '.' << std::setw(6) << std::setfill('0') << us.count();
+
     return oss.str();
 }
+
 
 // Timestamp do nazwy pliku: YYYYMMDD_HHMMSS
 std::string currentUtcTimestampForFilename() {
@@ -111,25 +118,44 @@ std::string currentUtcTimestampForFilename() {
 class PID {
 public:
     PID(double kp, double ki, double kd, double dt,
-        double integral_min, double integral_max)
+        double integral_min, double integral_max,
+        bool deadzone_flag, bool lowpass_filter_flag)
         : kp_(kp), ki_(ki), kd_(kd), dt_(dt),
           prev_error_(0.0), integral_(0.0),
-          integral_min_(integral_min), integral_max_(integral_max) {}
+          integral_min_(integral_min), integral_max_(integral_max),
+          deadzone_flag_(deadzone_flag),
+          lowpass_filter_flag_(lowpass_filter_flag),
+          d_state_(0.0)
+    {}
 
     double compute(double setpoint, double measured) {
         const double error = setpoint - measured;
 
-        integral_ += error * dt_;
+        // Deadzone tylko dla P i I
+        const double ePI = deadzone_flag_ ? deadzone(error) : error;
+
+        // I liczona z ePI (deadzone wpływa na całkę) + saturacja tylko na całce
+        integral_ += ePI * dt_;
         if (integral_ > integral_max_) integral_ = integral_max_;
         if (integral_ < integral_min_) integral_ = integral_min_;
 
-        const double derivative = (error - prev_error_) / dt_;
+        // Surowa pochodna z error (bez deadzone)
+        const double derivative_raw = (error - prev_error_) / dt_;
         prev_error_ = error;
 
-        pid_signals_.P = kp_ * error;
+        // D z filtrem dolnoprzepustowym 1/(50s+1) tylko jeśli flaga włączona
+        double derivative_used = derivative_raw;
+        if (lowpass_filter_flag_) {
+            const double tau = 50;                 // 1/(50s+1)
+            const double a = std::exp(-dt_ / tau);    // dyskretny LPF 1 rzędu
+            d_state_ = a * d_state_ + (1.0 - a) * derivative_raw;
+            derivative_used = d_state_;
+        }
+
+        pid_signals_.P = kp_ * ePI;
         pid_signals_.I = ki_ * integral_;
-        pid_signals_.D = kd_ * derivative;
-    
+        pid_signals_.D = kd_ * derivative_used;
+
         return pid_signals_.P + pid_signals_.I + pid_signals_.D;
     }
 
@@ -141,11 +167,24 @@ public:
     void setKp(double kp) { kp_ = kp; }
 
 private:
+    static double deadzone(double x) {
+        constexpr double start = -0.052;
+        constexpr double end   =  0.052;
+        if (x >= start && x <= end) return 0.0;
+        if (x > end)  return x - end;
+        return x - start;
+    }
+
     double kp_, ki_, kd_, dt_;
     PidSignals pid_signals_{};
     double prev_error_, integral_;
     double integral_min_, integral_max_;
+    bool deadzone_flag_;
+    bool lowpass_filter_flag_;
+
+    double d_state_; // stan filtra D (tylko gdy lowpass_filter_flag_==true)
 };
+
 
 // ===========================
 // Klasa: AttitudeSensor (ROLL)
@@ -267,8 +306,8 @@ public:
              double dt,
              double base_throttle)
       : client_(client),
-        pid_roll_(8.0, 8.0, 0.0, dt, -400.0, 400.0),
-        pid_omega_(30.0, 0.000, 0.028, dt, -100.0, 100.0),
+        pid_roll_(5.0, 5.0, 0.0, dt, -400.0, 400.0, false, false),
+        pid_omega_(30.0, 0.000, 0.028, dt, -100.0, 100.0, true, true),
         roll_controller_signals_(),
         base_throttle_(base_throttle),
         roll_setpoint_rad_(0.0),
