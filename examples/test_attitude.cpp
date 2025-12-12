@@ -1,5 +1,8 @@
 #include <Client.hpp>
 #include <msp_msg.hpp>
+#include "MotorMixer.hpp"
+#include "MotorSender.hpp"
+#include "Filter.hpp"
 
 #include <iostream>
 #include <thread>
@@ -26,12 +29,7 @@
 
 namespace fs = std::filesystem;
 
-struct MotorCommand {
-    uint16_t motor1;
-    uint16_t motor2;
-    uint16_t motor3;
-    uint16_t motor4;
-};
+// MotorCommand is provided by MotorMixer.hpp
 
 struct ControlOutput {
     double pid_roll;   // sygnał z regulatora kąta (ω_setpoint)
@@ -211,96 +209,115 @@ private:
     double omega_yaw_rad_;
 };
 
+
+class GravityCompensator {
+    public:
+        GravityCompensator(double a_, double b_, double c_,
+                           double m_, double g_, double l_cog_, double l_,
+                           double base_throttle = 1200.0)
+            : a(a_), b(b_), c(c_), m(m_), g(g_), l_cog(l_cog_), l(l_)
+        {
+            updateKt(base_throttle);
+            updateKff();
+        }
+
+        // Update linearized thrust gain k_T based on current base throttle (PWM)
+        void updateKt(double base_throttle) {
+            Kt_ = 2.0 * a * base_throttle + b;
+        }
+
+        // Recompute feedforward gain Kff (must be called after updateKt)
+        void updateKff() {
+            // protect against division by zero
+            if (Kt_ == 0.0) Kff_ = 0.0;
+            else Kff_ = (m * g * l_cog) / (4.0 * l * Kt_);
+        }
+
+        // Compute gravity feedforward contribution in PWM for given roll (rad)
+        // base_throttle is used to recompute linearized k_T if it changed
+        double feedforwardPWM(double roll_rad, double base_throttle) {
+            updateKt(base_throttle);
+            updateKff();
+            return Kff_ * std::sin(roll_rad);
+        }
+
+        // Convenience: return total control (controller PWM + gravity FF)
+        double apply(double controller_pwm, double roll_rad, double base_throttle) {
+            return controller_pwm + feedforwardPWM(roll_rad, base_throttle);
+        }
+
+        // Accessors
+        double Kt() const { return Kt_; }
+        double Kff() const { return Kff_; }
+    private:
+        double Kt_; // delta_PWM to delta_thrust gain  
+        double Kff_; // feedforward gain
+        double a, b, c;
+        double m, g, l_cog, l;
+};
+
+
 // ===========================
 // Klasa: RollController (steruje silnikami 1-4)
 // ===========================
 class RollController {
 public:
     RollController(msp::client::Client& client,
-                   msp::FirmwareVariant fw_variant,
-                   double dt,
-                   double base_throttle)
-        : client_(client),
-          pid_roll_(8.5, 10, 0.0, dt, -400.0, 400.0),
-          pid_omega_(20.0, 0.000, 0.001, dt, -100.0, 100.0),
-          roll_controller_signals_(),
-          motor_msg_(fw_variant),
-          base_throttle_(base_throttle),
-          roll_setpoint_rad_(0.0),
-          kp_roll_base_(8.5),   // bazowe Kp roll
-          kp_omega_base_(20.0)  // bazowe Kp omega
+             msp::FirmwareVariant /*fw_variant*/,
+             double dt,
+             double base_throttle)
+      : client_(client),
+        pid_roll_(8.0, 8.0, 0.0, dt, -400.0, 400.0),
+        pid_omega_(30.0, 0.000, 0.028, dt, -100.0, 100.0),
+        roll_controller_signals_(),
+        base_throttle_(base_throttle),
+        roll_setpoint_rad_(0.0),
+        kp_roll_base_(8.5),   // bazowe Kp roll
+        kp_omega_base_(20.0)  // bazowe Kp omega
     {}
 
     void setRollSetpoint(double roll_setpoint_rad) { roll_setpoint_rad_ = roll_setpoint_rad; }
 
-    void update(double roll_meas_rad, double omega_roll_meas_rad) {
-        // wspólna skala zależna od |roll|
-        const double abs_roll = std::fabs(roll_meas_rad);
-        const double roll_for_max_kp_rad = 20.0 * M_PI / 180.0; // 20 stopni
+    
 
-        double rel = abs_roll / roll_for_max_kp_rad; // 0..~∞
-        if (rel > 1.0) rel = 1.0;                    // saturacja do [0,1]
+    ControlOutput calculate(double roll_meas_rad, double omega_roll_meas_rad) {
+        // wspólna skala zależna od |roll|
+        // const double abs_roll = std::fabs(roll_meas_rad);
+        // const double roll_for_max_kp_rad = 20.0 * M_PI / 180.0; // 20 stopni
+
+        // double rel = abs_roll / roll_for_max_kp_rad; // 0..~∞
+        // if (rel > 1.0) rel = 1.0;                    // saturacja do [0,1]
 
         // skala 0.4..1.0
-        const double scale = 0.4 + 0.6 * rel;
+        // const double scale = 0.4 + 0.6 * rel;
 
         // === dynamiczne Kp dla PID po kącie (roll) ===
-        const double kp_roll_dynamic = kp_roll_base_ * scale;
-        pid_roll_.setKp(kp_roll_dynamic);
+        // const double kp_roll_dynamic = kp_roll_base_ * scale;
+        // pid_roll_.setKp(kp_roll_dynamic);
 
         // 1) PID po kącie
         double omega_setpoint = pid_roll_.compute(roll_setpoint_rad_, roll_meas_rad);
 
         // === dynamiczne Kp dla PID po prędkości (omega) ===
-        const double kp_omega_dynamic = kp_omega_base_ * scale;
-        pid_omega_.setKp(kp_omega_dynamic);
+        // const double kp_omega_dynamic = kp_omega_base_ * scale;
+        // pid_omega_.setKp(kp_omega_dynamic);
 
         // 2) PID po prędkości z dynamicznym Kp
         double control = pid_omega_.compute(omega_setpoint, omega_roll_meas_rad); 
 
-        // Silniki dla osi ROLL:
-        //  - Roll w prawo → 3 i 4 ↑, 1 i 2 ↓
-        //  - Roll w lewo  → 1 i 2 ↑, 3 i 4 ↓
-        const double m1 = base_throttle_ - control;
-        const double m2 = base_throttle_ - control;
-        const double m3 = base_throttle_ + control;
-        const double m4 = base_throttle_ + control;
-
-        const uint16_t m1_pwm = clampMotor(m1);
-        const uint16_t m2_pwm = clampMotor(m2);
-        const uint16_t m3_pwm = clampMotor(m3);
-        const uint16_t m4_pwm = clampMotor(m4);
-
-        motor_msg_.motor = {{
-            m1_pwm,
-            m2_pwm,
-            m3_pwm,
-            m4_pwm,
-            0, 0, 0, 0
-        }};
-
-        std::cout << "[RollController] control=" << control
-                  << " Kp_roll=" << kp_roll_dynamic
-                  << " Kp_omega=" << kp_omega_dynamic
-                  << " roll=" << roll_meas_rad
-                  << " m1=" << m1
-                  << " m2=" << m2
-                  << " m3=" << m3
-                  << " m4=" << m4 << '\n';
-
-        if (client_.sendMessage(motor_msg_) != 1)
-            std::cerr << "[RollController] Failed to send motor command\n";
-
-        // Sygnały PID zapisujemy tu.
+        // Sygnały PID zapisujemy wewnętrznie (dla logów). The controller
+        // returns control explicitly to the caller; mixing/sending remain
+        // the caller's responsibility.
         roll_controller_signals_.control_output.pid_roll   = omega_setpoint;
         roll_controller_signals_.control_output.pid_omega  = control;
-        roll_controller_signals_.motor_command.motor1      = m1_pwm;
-        roll_controller_signals_.motor_command.motor2      = m2_pwm;
-        roll_controller_signals_.motor_command.motor3      = m3_pwm;
-        roll_controller_signals_.motor_command.motor4      = m4_pwm;
         roll_controller_signals_.pid_roll_signals          = pid_roll_.getPidSignals();
         roll_controller_signals_.pid_omega_signals         = pid_omega_.getPidSignals();
-        // Pola measurements uzupełnimy w main()
+        // Pola measurements uzupełnimy w main() as before.
+
+        ControlOutput out;
+        out.pid_roll = omega_setpoint;
+        out.pid_omega = control;
+        return out;
     }
 
     RollControllerSignals getRollControllerSignals() const {
@@ -320,9 +337,9 @@ private:
     PID pid_roll_;
     PID pid_omega_;
     RollControllerSignals roll_controller_signals_;
-    msp::msg::SetMotor motor_msg_;
     double base_throttle_;
     double roll_setpoint_rad_;
+    // mixing and sender components are handled outside the controller
 
     // bazowe Kp dla PID_roll i PID_omega
     double kp_roll_base_;
@@ -371,22 +388,44 @@ int main(int argc, char* argv[]) {
 
     const double dt = 0.001;
     const int loop_sleep_ms = static_cast<int>(dt * 1000.0);
+    const double PWM_0 = 1200.0; //  bazowy sygnał PWM
+
+    // control settings 
+    // bool compensation_enabled = true;
+    // // copter model parameters
+    // const double m = ;
+    // const double g = 9.81;
+    // const double l = ;
+    // const double l_cog = ;
+
+    // // pwm -> throttle model parameters (a*PWM^2 + b*PWM + c)
+    // const double a = ;
+    // const double b = ;
+    // const double c = ;
+    // // linearized pwm -> throttle model
+    // const double kt = 2.0 * a * PWM_0 + b;
+
+    // // compensation component 
+    // double Kff = (m * g * l_cog) / (4.0 * l * kt);
+    // double gravity_ff_pwm = 0.0;
 
     // === PARAMETRY FILTRÓW I WYBORU ŹRÓDŁA OMEGA ===
-    const double omega_filter_alpha = 0.001;    // 0..1, im bliżej 1 tym mocniejsze wygładzenie
-    const bool use_gyro_for_omega   = true;     // true -> używaj filtrowanego gyro
+    const double omega_filter_alpha = 0.01  ;    // 0..1, im bliżej 1 tym mocniejsze wygładzenie
+    const bool use_gyro_for_omega   = true; // false is dangerous     // true -> używaj filtrowanego gyro
                                                 // false -> używaj filtrowanej pochodnej kąta
-    double prev_roll_rad = 0.0;
-    double omega_from_roll_filt = 0.0;
-    double omega_gyro_filt      = 0.0;
-    bool first_sample = true;
+    // Use AngularRateFilter to encapsulate derivative + LPF logic
+    AngularRateFilter omega_filter(dt, omega_filter_alpha, use_gyro_for_omega);
     // ===============================================
 
     AttitudeSensor attitude_sensor(client, fw_variant);
     AngularRateSensor rate_sensor(client, fw_variant);
-    RollController roll_controller(client, fw_variant, dt, 1200.0);
+    RollController roll_controller(client, fw_variant, dt, PWM_0);
 
-    roll_controller.setRollSetpoint(0.0); // poziom = 0 rad
+    roll_controller.setRollSetpoint(-0.0); // poziom = 0 rad
+
+    // External mixing and sending components (moved out of RollController)
+    MotorMixer mixer(PWM_0);
+    MotorSender sender(client, fw_variant);
 
     // ====== OTWARCIE PLIKU I START LOGGERA ======
 
@@ -480,44 +519,45 @@ int main(int argc, char* argv[]) {
         double roll_rad = attitude_sensor.getRollRad();
         double omega_gyro_raw = rate_sensor.getOmegaRollRad();
 
-        if (first_sample) {
-            prev_roll_rad = roll_rad;
-            omega_from_roll_filt = 0.0;
-            omega_gyro_filt = omega_gyro_raw;
-            first_sample = false;
-        }
-
-        // Surowa pochodna kąta
-        double omega_from_roll_raw = (roll_rad - prev_roll_rad) / dt;
-        prev_roll_rad = roll_rad;
-
-        // Filtrowanie (prosta 1. rzędu: y_k = α y_{k-1} + (1-α) x_k)
-        omega_from_roll_filt =
-            omega_filter_alpha * omega_from_roll_filt +
-            (1.0 - omega_filter_alpha) * omega_from_roll_raw;
-
-        omega_gyro_filt =
-            omega_filter_alpha * omega_gyro_filt +
-            (1.0 - omega_filter_alpha) * omega_gyro_raw;
-
-        // Wybór sygnału do regulatora
-        double omega_for_controller = use_gyro_for_omega
-                                      ? omega_gyro_filt
-                                      : omega_from_roll_filt;
+        // Compute filtered angular rate using the AngularRateFilter component.
+        double omega_for_controller = omega_filter.update(roll_rad, omega_gyro_raw);
+        // double omega_for_controller =  omega_gyro_raw;
 
         std::cout << "ROLL = " << roll_rad
                   << " rad,  OMEGA_used = " << omega_for_controller
                   << " rad/s\n";
 
-        roll_controller.update(roll_rad, omega_for_controller);
+        ControlOutput control = roll_controller.calculate(roll_rad, omega_for_controller);
+        // retrieve signals for logging (they are still maintained internally)
         signals = roll_controller.getRollControllerSignals();
+        // expose the explicit control returned by the controller
+        signals.control_output = control;
+
+        // Perform mixing and send motor outputs using external components
+        MotorCommand cmds = mixer.mix(signals.control_output.pid_omega);
+        std::array<uint16_t,4> arr = {cmds.motor1, cmds.motor2, cmds.motor3, cmds.motor4};
+        int send_res = sender.send(arr);
+
+        // expose motor commands in signals for logging
+        signals.motor_command.motor1 = cmds.motor1;
+        signals.motor_command.motor2 = cmds.motor2;
+        signals.motor_command.motor3 = cmds.motor3;
+        signals.motor_command.motor4 = cmds.motor4;
+
+        std::cout << "[Main] control=" << signals.control_output.pid_omega
+            << " roll=" << roll_rad
+            << " m1=" << cmds.motor1
+            << " m2=" << cmds.motor2
+            << " m3=" << cmds.motor3
+            << " m4=" << cmds.motor4
+            << " send_res=" << send_res << '\n';
 
         // UZUPEŁNIENIE PÓL MEASUREMENTS (NA POTRZEBY LOGÓW)
         signals.measurements.roll               = roll_rad;
         signals.measurements.omega_roll         = omega_for_controller;
-        signals.measurements.omega_roll_from_roll = omega_from_roll_filt;
+        signals.measurements.omega_roll_from_roll = omega_filter.getOmegaFromRollFilt();
         signals.measurements.omega_roll_gyro      = omega_gyro_raw;
-        signals.measurements.omega_roll_gyro_filt = omega_gyro_filt;
+        signals.measurements.omega_roll_gyro_filt = omega_filter.getOmegaGyroFilt();
 
         Sample sample;
         sample.timestamp_utc = currentUtcTimestamp();
