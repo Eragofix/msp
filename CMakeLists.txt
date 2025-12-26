@@ -96,6 +96,27 @@ if(BUILD_EXAMPLES)
     add_executable(client_read_test examples/client_read_test.cpp)
     target_link_libraries(client_read_test mspclient)
 
+    # test attitude control (your modified file)
+    add_executable(test_attitude examples/test_attitude.cpp
+            examples/AngularRateSensor.cpp
+            examples/AttitudeSensor.cpp)
+    target_link_libraries(test_attitude msp_fcu)
+
+    # HIL control example (state-feedback + UDP comm)
+    add_executable(state_feedback_hil examples/state_feedback_hil.cpp
+             examples/udp_comm_module.cpp
+             examples/state_feedback.cpp)
+    target_link_libraries(state_feedback_hil msp_fcu)
+
+    # IRL control example (state-feedback + serial comm)
+    add_executable(state_feedback_irl examples/state_feedback_irl.cpp
+            examples/state_feedback.cpp
+            examples/AngularRateSensor.cpp
+            examples/AttitudeSensor.cpp)
+    target_link_libraries(state_feedback_irl msp_fcu)
+
+    
+
 endif()
 
 ################################################################################

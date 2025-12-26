@@ -3,6 +3,8 @@
 #include "MotorMixer.hpp"
 #include "MotorSender.hpp"
 #include "Filter.hpp"
+#include "AttitudeSensor.hpp"
+#include "AngularRateSensor.hpp"
 
 #include <iostream>
 #include <thread>
@@ -186,67 +188,9 @@ private:
 };
 
 
-// ===========================
-// Klasa: AttitudeSensor (ROLL)
-// ===========================
-class AttitudeSensor {
-public:
-    AttitudeSensor(msp::client::Client& client, msp::FirmwareVariant fw_variant)
-        : client_(client), attitude_msg_(fw_variant), roll_rad_(0.0) {}
-
-    bool update() {
-        if (client_.sendMessage(attitude_msg_) != 1) {
-            std::cerr << "[AttitudeSensor] Failed to read attitude\n";
-            return false;
-        }
-        double roll_deg = static_cast<double>(attitude_msg_.roll);
-        roll_rad_ = roll_deg * M_PI / 180.0;
-        return true;
-    }
-
-    double getRollRad() const { return roll_rad_; }
-
-private:
-    msp::client::Client& client_;
-    msp::msg::Attitude attitude_msg_;
-    double roll_rad_;
-};
-
-// ===========================
-// Klasa: AngularRateSensor (RAW_IMU)
-// ===========================
-class AngularRateSensor {
-public:
-    AngularRateSensor(msp::client::Client& client, msp::FirmwareVariant fw_variant)
-        : client_(client), raw_imu_msg_(fw_variant),
-          omega_roll_rad_(0.0), omega_pitch_rad_(0.0), omega_yaw_rad_(0.0) {}
-
-    bool update() {
-        if (client_.sendMessage(raw_imu_msg_) != 1) {
-            std::cerr << "[AngularRateSensor] Failed to read RawImu\n";
-            return false;
-        }
-
-        constexpr double DEG2RAD = M_PI / 180.0;
-        constexpr double GYRO_LSB_PER_DPS = 16.4;
-        constexpr double GYRO_SCALE_RAD_PER_LSB = (1.0 / GYRO_LSB_PER_DPS) * DEG2RAD;
-
-        omega_roll_rad_  = static_cast<double>(raw_imu_msg_.gyro[0]) * GYRO_SCALE_RAD_PER_LSB;
-        omega_pitch_rad_ = static_cast<double>(raw_imu_msg_.gyro[1]) * GYRO_SCALE_RAD_PER_LSB;
-        omega_yaw_rad_   = static_cast<double>(raw_imu_msg_.gyro[2]) * GYRO_SCALE_RAD_PER_LSB;
-
-        return true;
-    }
-
-    double getOmegaRollRad() const { return omega_roll_rad_; }
-
-private:
-    msp::client::Client& client_;
-    msp::msg::RawImu raw_imu_msg_;
-    double omega_roll_rad_;
-    double omega_pitch_rad_;
-    double omega_yaw_rad_;
-};
+// AttitudeSensor and AngularRateSensor have been moved to separate files
+// AttitudeSensor: examples/AttitudeSensor.hpp/cpp
+// AngularRateSensor: examples/AngularRateSensor.hpp/cpp
 
 
 class GravityCompensator {
@@ -425,9 +369,9 @@ int main(int argc, char* argv[]) {
 
     msp::FirmwareVariant fw_variant = msp::FirmwareVariant::BAFL;
 
-    const double dt = 0.001;
+    const double dt = 0.0001;
     const int loop_sleep_ms = static_cast<int>(dt * 1000.0);
-    const double PWM_0 = 1200.0; //  bazowy sygnał PWM
+    const double PWM_0 = 1400.0; //  bazowy sygnał PWM
 
     // control settings 
     // bool compensation_enabled = true;
@@ -449,7 +393,7 @@ int main(int argc, char* argv[]) {
     // double gravity_ff_pwm = 0.0;
 
     // === PARAMETRY FILTRÓW I WYBORU ŹRÓDŁA OMEGA ===
-    const double omega_filter_alpha = 0.01  ;    // 0..1, im bliżej 1 tym mocniejsze wygładzenie
+    const double omega_filter_alpha = 0.00  ;    // 0..1, im bliżej 1 tym mocniejsze wygładzenie
     const bool use_gyro_for_omega   = true; // false is dangerous     // true -> używaj filtrowanego gyro
                                                 // false -> używaj filtrowanej pochodnej kąta
     // Use AngularRateFilter to encapsulate derivative + LPF logic
@@ -460,7 +404,7 @@ int main(int argc, char* argv[]) {
     AngularRateSensor rate_sensor(client, fw_variant);
     RollController roll_controller(client, fw_variant, dt, PWM_0);
 
-    roll_controller.setRollSetpoint(-0.0); // poziom = 0 rad
+    roll_controller.setRollSetpoint(-0.3); // poziom = 0 rad
 
     // External mixing and sending components (moved out of RollController)
     MotorMixer mixer(PWM_0);
