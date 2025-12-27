@@ -7,6 +7,7 @@
 #include "AngularRateSensor.hpp"
 #include "model_parameters.hpp"
 #include "state_feedback.hpp"
+#include "AsyncCsvLogger.hpp"
 
 #include <iostream>
 #include <thread>
@@ -15,17 +16,6 @@
 #include <cstdint>
 #include <csignal>
 #include <atomic>
-
-// ==== DODANE DO LOGOWANIA ====
-#include <fstream>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
-#include <string>
-#include <sstream>
-#include <iomanip>
-#include <filesystem>
-// =============================
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -73,8 +63,8 @@ int main(int argc, char* argv[]) {
 
     msp::FirmwareVariant fw_variant = msp::FirmwareVariant::BAFL;
 
-    const double dt = 0.00005;
-    const int loop_sleep_ms = static_cast<int>(dt * 1000.0);
+    const double dt = 0.0001;
+    // use dt-based duration directly in loop sleep
 
     ModelParameters params;
     AttitudeSensor attitude_sensor(client, fw_variant);
@@ -87,14 +77,15 @@ int main(int argc, char* argv[]) {
         zeta_d
     );
 
-    const double omega_filter_alpha = 0.00  ;    // 0..1, im bliżej 1 tym mocniejsze wygładzenie
-    const bool use_gyro_for_omega   = true; // false is dangerous     // true -> używaj filtrowanego gyro
-                                                // false -> używaj filtrowanej pochodnej kąta
-    // Use AngularRateFilter to encapsulate derivative + LPF logic
+    const double omega_filter_alpha = 0.00;
+    const bool use_gyro_for_omega   = true;
     AngularRateFilter omega_filter(dt, omega_filter_alpha, use_gyro_for_omega);
 
     MotorMixer mixer(params.PWM_base);
     MotorSender sender(client, fw_variant);
+
+    // Async CSV logger
+    AsyncCsvLogger logger("logs", "log_state_feedback_irl_", 4096);
 
     while (!interrupted) {
         if (!attitude_sensor.update() || !rate_sensor.update()) continue;
@@ -102,36 +93,65 @@ int main(int argc, char* argv[]) {
         double roll_rad = attitude_sensor.getRollRad();
         double omega_gyro_raw = rate_sensor.getOmegaRollRad();
         double omega_for_controller = omega_filter.update(roll_rad, omega_gyro_raw);
-        double u = roll_controller.compute(roll_rad, omega_for_controller);
 
-        // Saturate control signal to [-100, 100]
-        if (u > 200.0) u = 400.0;
-        if (u < -200.0) u = -400.0;
+        // compute raw control
+        double u_raw = roll_controller.compute(roll_rad, omega_for_controller);
 
-        std::cout << "ROLL = " << roll_rad
-                  << " rad,  OMEGA_used = " << omega_gyro_raw
-                  << " rad/s\n";
+        // Saturate control signal to [-400, 400] (keeping same limits as other examples)
+        double u_sat = u_raw;
+        if (u_sat > 400.0) u_sat = 400.0;
+        if (u_sat < -400.0) u_sat = -400.0;
 
+        // Fetch u0 for logging
+        const double u0 = roll_controller.getU0();
+
+        std::cout << "ROLL=" << roll_rad
+                  << " rad | OMEGA=" << omega_for_controller
+                  << " rad/s | u0=" << u0
+                  << " | u_sat=" << u_sat << "\n";
 
         // Perform mixing and send motor outputs using external components
-        MotorCommand cmds = mixer.mix(u);
+        MotorCommand cmds = mixer.mix(u_sat);
         std::array<uint16_t,4> arr = {cmds.motor1, cmds.motor2, cmds.motor3, cmds.motor4};
         int send_res = sender.send(arr);
 
-        std::cout << "[Main] control=" << u
+        std::cout << "[Main] control=" << u_sat
             << " roll=" << roll_rad
             << " m1=" << cmds.motor1
             << " m2=" << cmds.motor2
             << " m3=" << cmds.motor3
             << " m4=" << cmds.motor4
             << " send_res=" << send_res << '\n';
- 
-        std::this_thread::sleep_for(std::chrono::milliseconds(loop_sleep_ms));
+
+        // Prepare and push lightweight POD row to logger
+        LogRow row{};
+        row.roll_rad = roll_rad;
+        row.omega_used_rad_s = omega_for_controller;
+        row.omega_gyro_raw_rad_s = omega_gyro_raw;
+        // try to fetch gyro filtered value if available from filter
+        double gyro_filt = 0.0;
+#ifdef HAS_ANGULAR_RATE_FILTER_GETTERS
+        gyro_filt = omega_filter.getOmegaGyroFilt();
+#endif
+        row.omega_gyro_filt_rad_s = gyro_filt;
+        row.u_raw = u_raw;
+        row.u_sat = u_sat;
+        row.motor1 = cmds.motor1;
+        row.motor2 = cmds.motor2;
+        row.motor3 = cmds.motor3;
+        row.motor4 = cmds.motor4;
+
+        logger.push(row);
+        std::this_thread::sleep_for(std::chrono::duration<double>(dt));
     }
 
     std::cerr << "Control loop interrupted." << std::endl;
 
     sendEmergencyStop(client, fw_variant);
+
+    // ensure logger is stopped and flushed before exiting
+    logger.stop();
+
     client.stop();
 
     std::cout << "PROGRAM COMPLETE\n";

@@ -24,7 +24,7 @@ void StateFeedbackController::recomputeGains() {
         std::cerr << "[StateFeedback] denom for u0 is zero, setting u0=0\n";
         u0_ = 0.0;
     } else {
-        u0_ = (m_ * g_ * l_cog_ * std::sin(phi0_)) / denomU0;
+        u0_ = -(m_ * g_ * l_cog_ * std::sin(phi0_)) / denomU0;
     }
 
     // kg = (m*g*l_cog/Ix) * cos(phi0);

@@ -63,7 +63,7 @@ private:
             std::cerr << "[IntegralStateFeedback] denom for u0 is zero, setting u0=0\n";
             u0_ = 0.0;
         } else {
-            u0_ = (m_ * g_ * l_cog_ * std::sin(phi0_)) / denomU0;
+            u0_ = -(m_ * g_ * l_cog_ * std::sin(phi0_)) / denomU0;
         }
 
         if (std::abs(Ix_) < 1e-12) {

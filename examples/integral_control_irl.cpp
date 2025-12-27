@@ -7,6 +7,7 @@
 #include "AngularRateSensor.hpp"
 #include "model_parameters.hpp"
 #include "integral_state_feedback.hpp"
+#include "AsyncCsvLogger.hpp"
 
 #include <iostream>
 #include <thread>
@@ -84,9 +85,12 @@ int main(int argc, char* argv[]) {
     MotorMixer mixer(params.PWM_base);
     MotorSender sender(client, fw_variant);
 
+    // Async CSV logger
+    AsyncCsvLogger logger("logs", "log_integral_control_irl_", 4096);
+
     std::cout << "IRL integral state-feedback started\n";
     std::cout << std::fixed << std::setprecision(4);
-    const int loop_sleep_ms = static_cast<int>(dt * 1000.0);
+    // use dt-based duration directly in loop sleep
 
     while (!interrupted) {
         if (!attitude_sensor.update() || !rate_sensor.update()) {
@@ -118,12 +122,31 @@ int main(int argc, char* argv[]) {
                   << " send_res=" << send_res
                   << '\n';
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(loop_sleep_ms));
+        // Prepare and push lightweight POD row to logger
+        LogRow row{};
+        row.roll_rad = roll_rad;
+        row.omega_used_rad_s = omega_for_controller;
+        row.omega_gyro_raw_rad_s = omega_gyro_raw;
+#ifdef HAS_ANGULAR_RATE_FILTER_GETTERS
+        row.omega_gyro_filt_rad_s = omega_filter.getOmegaGyroFilt();
+#else
+        row.omega_gyro_filt_rad_s = 0.0;
+#endif
+        row.u_raw = u_raw;
+        row.u_sat = u_sat;
+        row.motor1 = cmds.motor1;
+        row.motor2 = cmds.motor2;
+        row.motor3 = cmds.motor3;
+        row.motor4 = cmds.motor4;
+
+        logger.push(row);
+        std::this_thread::sleep_for(std::chrono::duration<double>(dt));
     }
 
     std::cerr << "Control loop interrupted." << std::endl;
 
     sendEmergencyStop(client, fw_variant);
+    logger.stop();
     client.stop();
 
     std::cout << "PROGRAM COMPLETE\n";

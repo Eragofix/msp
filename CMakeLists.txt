@@ -104,32 +104,34 @@ if(BUILD_EXAMPLES)
 
     # HIL control example (state-feedback + UDP comm)
     add_executable(state_feedback_hil examples/state_feedback_hil.cpp
-             examples/udp_comm_module.cpp
-             examples/state_feedback.cpp)
+         examples/udp_comm_module.cpp
+         examples/state_feedback.cpp)
     target_link_libraries(state_feedback_hil msp_fcu)
 
     # IRL control example (state-feedback + serial comm)
-    add_executable(state_feedback_irl examples/state_feedback_irl.cpp
-            examples/state_feedback.cpp
-            examples/AngularRateSensor.cpp
-            examples/AttitudeSensor.cpp)
+    add_executable(state_feedback_irl
+        examples/state_feedback_irl.cpp
+        examples/state_feedback.cpp
+        examples/AngularRateSensor.cpp
+        examples/AttitudeSensor.cpp
+        examples/AsyncCsvLogger.cpp
+    )
     target_link_libraries(state_feedback_irl msp_fcu)
 
     # Integral control example (HIL)
     add_executable(integral_control_hil
         examples/integral_control_hil.cpp
         examples/udp_comm_module.cpp
-        examples/integral_state_feedback.hpp
     )
     target_link_libraries(integral_control_hil msp_fcu)
 
 
-    # Integral control example (HIL)
+    # Integral control example (IRL)
     add_executable(integral_control_irl
         examples/integral_control_irl.cpp
-        examples/integral_state_feedback.hpp
         examples/AngularRateSensor.cpp
         examples/AttitudeSensor.cpp
+        examples/AsyncCsvLogger.cpp
     )
     target_link_libraries(integral_control_irl msp_fcu)
 
