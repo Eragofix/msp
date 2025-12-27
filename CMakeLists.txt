@@ -115,7 +115,24 @@ if(BUILD_EXAMPLES)
             examples/AttitudeSensor.cpp)
     target_link_libraries(state_feedback_irl msp_fcu)
 
-    
+    # Integral control example (HIL)
+    add_executable(integral_control_hil
+        examples/integral_control_hil.cpp
+        examples/udp_comm_module.cpp
+        examples/integral_state_feedback.hpp
+    )
+    target_link_libraries(integral_control_hil msp_fcu)
+
+
+    # Integral control example (HIL)
+    add_executable(integral_control_irl
+        examples/integral_control_irl.cpp
+        examples/integral_state_feedback.hpp
+        examples/AngularRateSensor.cpp
+        examples/AttitudeSensor.cpp
+    )
+    target_link_libraries(integral_control_irl msp_fcu)
+
 
 endif()
 
